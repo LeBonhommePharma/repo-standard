@@ -314,11 +314,9 @@ def one_bundle_id_per_app(ctx):
 @rule("DECIDE-001", "Decisions are recorded on the default branch", basis="evidence")
 def decisions_recorded(ctx):
     rid = "DECIDE-001"
-    tracked = ctx.git("ls-tree", "-r", "--name-only", f"origin/{ctx.default_branch}") \
-        or ctx.git("ls-tree", "-r", "--name-only", ctx.default_branch)
-    if not tracked:
+    files, _ = ctx.default_tree()
+    if files is None:
         return unknown(rid, f"could not list the tree of {ctx.default_branch}")
-    files = set(tracked.splitlines())
     # A decision log is any tracked file whose name says it records decisions.
     log = re.compile(r"(DECISIONS|ADR|decisions?)[^/]*\.md$|/adr/|(^|/)docs/decisions/", re.I)
     found = sorted(f for f in files if log.search(f))
@@ -328,10 +326,7 @@ def decisions_recorded(ctx):
                    f"lives only in a chat session or on an unmerged branch is not recorded")
     # A log that records nothing is not a log.
     for f in found:
-        try:
-            body = ctx.git("show", f"{ctx.default_branch}:{f}")
-        except Exception:
-            body = ""
+        body = ctx.show_on_default(f)
         if re.search(r"decided[ -]?by", body, re.I) and re.search(r"\d{4}-\d{2}-\d{2}", body):
             return ok(rid, f"decision log on {ctx.default_branch}: {f}")
     return bad(rid,
@@ -348,12 +343,11 @@ def conformance_output_not_public(ctx):
     # spots. The value is in the tool, not in the findings, and the findings
     # have a blast radius the tool does not.
     report = re.compile(r"(CONFORMANCE|gap[-_]?report|conformance[-_]?report)", re.I)
-    tracked = ctx.git("ls-tree", "-r", "--name-only", f"origin/{ctx.default_branch}") \
-        or ctx.git("ls-tree", "-r", "--name-only", ctx.default_branch)
-    if not tracked:
+    tracked, _ = ctx.default_tree()
+    if tracked is None:
         return unknown(rid, f"could not list the tree of {ctx.default_branch}")
 
-    committed = sorted(f for f in tracked.splitlines() if report.search(f))
+    committed = sorted(f for f in tracked if report.search(f))
     if committed:
         return bad(rid, f"{len(committed)} conformance report(s) committed",
                    ev="\n".join(committed))
@@ -381,12 +375,9 @@ def conformance_output_not_public(ctx):
 @rule("DOCS-001", "The standard/spec lives on the default branch", basis="evidence")
 def spec_on_default_branch(ctx):
     rid = "DOCS-001"
-    tracked = ctx.git("ls-tree", "-r", "--name-only", f"origin/{ctx.default_branch}")
-    if not tracked:
-        tracked = ctx.git("ls-tree", "-r", "--name-only", ctx.default_branch)
-    if not tracked:
+    on_main, _ = ctx.default_tree()
+    if on_main is None:
         return unknown(rid, f"could not list the tree of {ctx.default_branch}")
-    on_main = set(tracked.splitlines())
     docs = {str(p.relative_to(ctx.root)) for p in ctx.glob("*.md")}
     docs = {d for d in docs if d.lower().startswith(("docs/", "readme"))}
     if not docs:

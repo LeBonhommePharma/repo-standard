@@ -144,6 +144,10 @@ def make_good(root: Path):
     (root / "docs/app-store.md").write_text("# on main\n")
     commit(root, "initial")
     git(root, "update-ref", "refs/remotes/origin/main", "main")
+    # Reproduce a CI checkout of a PR branch: only origin/main exists, the
+    # local "main" does not. A rule that reads "main:<path>" instead of
+    # "origin/main:<path>" passes locally and fails here.
+    git(root, "branch", "-m", "main", "pr-branch")
     return {
         "branch_protection": {"main": {"required_pull_request_reviews": {}}},
         "rulesets": [],

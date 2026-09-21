@@ -130,6 +130,26 @@ class Context:
                 continue
             yield p
 
+    def default_tree(self):
+        """Files on the default branch, preferring the remote-tracking ref.
+
+        On a CI checkout of a PR branch the local `main` does not exist; only
+        `origin/main` does. A rule that reads the bare branch name works
+        locally and silently fails there.
+        """
+        for ref in (f"origin/{self.default_branch}", self.default_branch):
+            out = self.git("ls-tree", "-r", "--name-only", ref)
+            if out:
+                return set(out.splitlines()), ref
+        return None, None
+
+    def show_on_default(self, path):
+        for ref in (f"origin/{self.default_branch}", self.default_branch):
+            out = self.git("show", f"{ref}:{path}")
+            if out:
+                return out
+        return ""
+
     def git(self, *args):
         proc = subprocess.run(
             ["git", "-C", str(self.root), *args],

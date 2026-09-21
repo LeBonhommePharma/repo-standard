@@ -1,9 +1,14 @@
 """What a rule is allowed to look at.
 
-The GitHub side is an interface with two implementations: a live one that
-shells out to `gh`, and a static one loaded from JSON. Fixtures use the static
-one so that a rule about branch protection can be proven to fire without
-creating 67 throwaway GitHub repos.
+Two hard rules in here, both learned from bugs this checker shipped:
+
+1. **A failed read raises.** `git()` used to return "" on a non-zero exit, so
+   a rule could not tell "no output" from "the command failed". That produced a
+   FAIL with a false reason in one rule and a silent PASS in another. Callers
+   that genuinely treat a non-zero exit as information use `git_rc()` and say so.
+
+2. **Nothing reads a ref that a PR checkout might not have.** A CI checkout of
+   a PR branch has no local `main`, and may be shallow and detached.
 """
 from __future__ import annotations
 
@@ -14,52 +19,55 @@ from pathlib import Path
 
 
 class GitHubUnavailable(Exception):
-    pass
+    """A GitHub read could not be performed. Never means "nothing found"."""
+
+
+class GitError(Exception):
+    """A git command failed. Never means "empty output"."""
 
 
 class LiveGitHub:
-    """Reads the real GitHub API through an already-authenticated `gh`."""
-
     def __init__(self, slug: str):
         self.slug = slug
 
     def _api(self, path: str):
-        proc = subprocess.run(
-            ["gh", "api", path],
-            capture_output=True, text=True,
-        )
+        proc = subprocess.run(["gh", "api", path], capture_output=True, text=True)
         if proc.returncode != 0:
-            raise GitHubUnavailable(proc.stderr.strip()[:200])
+            raise GitHubUnavailable(proc.stderr.strip()[:200] or f"gh api {path} failed")
         return json.loads(proc.stdout or "null")
 
     def branch_protection(self, branch: str):
+        """None only when GitHub SAYS the branch is unprotected.
+
+        A 403 (no admin rights, plan limit) or a network error is not an
+        answer; it propagates. Conflating "forbidden" with "unprotected" would
+        report a protected repo as a violation, and would hide the fact that
+        nothing was actually read.
+        """
         try:
             return self._api(f"repos/{self.slug}/branches/{branch}/protection")
-        except GitHubUnavailable:
-            # 404 from this endpoint is the documented way GitHub says
-            # "this branch is not protected". That is a real answer, not a
-            # failure to read, so it is None rather than an exception.
-            return None
+        except GitHubUnavailable as exc:
+            msg = str(exc)
+            if "Branch not protected" in msg or "404" in msg:
+                return None
+            raise
 
     def rulesets(self):
-        out = []
-        for r in self._api(f"repos/{self.slug}/rulesets") or []:
-            out.append(self._api(f"repos/{self.slug}/rulesets/{r['id']}"))
-        return out
+        return [self._api(f"repos/{self.slug}/rulesets/{r['id']}")
+                for r in (self._api(f"repos/{self.slug}/rulesets") or [])]
 
     def open_pr_head_refs(self):
         proc = subprocess.run(
             ["gh", "pr", "list", "--repo", self.slug, "--state", "open",
              "--limit", "300", "--json", "headRefName"],
-            capture_output=True, text=True,
-        )
+            capture_output=True, text=True)
         if proc.returncode != 0:
-            raise GitHubUnavailable(proc.stderr.strip()[:200])
+            raise GitHubUnavailable(proc.stderr.strip()[:200] or "gh pr list failed")
         return {p["headRefName"] for p in json.loads(proc.stdout or "[]")}
 
     def workflow_runs_exist(self):
-        data = self._api(f"repos/{self.slug}/actions/runs?per_page=1")
-        return (data or {}).get("total_count", 0) > 0
+        return (self._api(f"repos/{self.slug}/actions/runs?per_page=1")
+                or {}).get("total_count", 0) > 0
 
     def default_branch(self):
         return (self._api(f"repos/{self.slug}") or {}).get("default_branch")
@@ -71,27 +79,37 @@ class StaticGitHub:
     def __init__(self, data: dict):
         self.data = data
 
+    def _maybe_raise(self, key):
+        # Fixtures use this to simulate an unavailable API.
+        if key in self.data.get("unavailable", []):
+            raise GitHubUnavailable(f"simulated failure: {key}")
+
     def branch_protection(self, branch):
+        self._maybe_raise("branch_protection")
         return self.data.get("branch_protection", {}).get(branch)
 
     def rulesets(self):
+        self._maybe_raise("rulesets")
         return self.data.get("rulesets", [])
 
     def open_pr_head_refs(self):
+        self._maybe_raise("open_pr_head_refs")
         return set(self.data.get("open_pr_head_refs", []))
 
     def workflow_runs_exist(self):
+        self._maybe_raise("workflow_runs_exist")
         return bool(self.data.get("workflow_runs_exist", False))
 
     def default_branch(self):
+        self._maybe_raise("default_branch")
         return self.data.get("default_branch")
 
 
 class NoGitHub:
     def _fail(self, *a, **k):
         raise GitHubUnavailable("no GitHub source configured (--offline)")
-    branch_protection = rulesets = open_pr_head_refs = workflow_runs_exist = _fail
-    default_branch = _fail
+    branch_protection = rulesets = open_pr_head_refs = _fail
+    workflow_runs_exist = default_branch = _fail
 
 
 class Context:
@@ -105,14 +123,14 @@ class Context:
         self.exceptions = {}
 
     def exception_for(self, rule_id):
-        """A recorded, reviewed exception for this repo and rule, or None.
+        """A recorded exception for this repo and rule, or None.
 
-        Exceptions live in the standard's own repo, not in the repo being
+        Exceptions live in the standard's own repo, never in the repo being
         checked -- a repo must not be able to exempt itself.
         """
         return self.exceptions.get(rule_id)
 
-    # --- filesystem helpers, all read-only ---
+    # ------------------------------------------------------------ filesystem
     def read_text(self, rel) -> str:
         return (self.root / rel).read_text(errors="replace")
 
@@ -130,40 +148,40 @@ class Context:
                 continue
             yield p
 
-    def default_tree(self):
-        """Files on the default branch, preferring the remote-tracking ref.
+    # ------------------------------------------------------------------ git
+    def git(self, *args) -> str:
+        """Run git. Raise GitError on failure -- never return "" for it."""
+        proc = subprocess.run(["git", "-C", str(self.root), *args],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip().splitlines()
+            raise GitError(f"git {' '.join(args)}: "
+                           f"{detail[0] if detail else f'exit {proc.returncode}'}")
+        return proc.stdout.strip()
 
-        On a CI checkout of a PR branch the local `main` does not exist; only
-        `origin/main` does. A rule that reads the bare branch name works
-        locally and silently fails there.
+    def git_rc(self, *args):
+        """(returncode, stdout) for callers where non-zero is information.
+
+        Only for commands whose failure is a meaningful answer rather than an
+        error -- `merge-tree` exiting non-zero means "conflict", not "broken".
         """
-        for ref in (f"origin/{self.default_branch}", self.default_branch):
-            out = self.git("ls-tree", "-r", "--name-only", ref)
-            if out:
-                return set(out.splitlines()), ref
-        return None, None
+        proc = subprocess.run(["git", "-C", str(self.root), *args],
+                              capture_output=True, text=True)
+        return proc.returncode, proc.stdout.strip()
 
-    def show_on_default(self, path):
-        for ref in (f"origin/{self.default_branch}", self.default_branch):
-            out = self.git("show", f"{ref}:{path}")
-            if out:
-                return out
-        return ""
+    def tracked_files(self) -> set:
+        """Files tracked in the working tree.
+
+        On a PR checkout this is the merge result, which is what every rule
+        about "is this recorded" actually wants to know. Works on a shallow,
+        detached checkout with no local default branch.
+        """
+        return set(self.git("ls-files").splitlines())
 
     def merge_is_noop(self, ref) -> bool:
-        """True if merging `ref` into the default branch changes nothing."""
+        """True if merging `ref` into the default branch would change nothing."""
         base = f"origin/{self.default_branch}"
-        out = self.git("merge-tree", "--write-tree", base, ref)
-        if not out:
-            return False
-        tree = out.splitlines()[0].strip()
-        # merge-tree exits non-zero and emits conflict info on conflict; git()
-        # returns "" then, so a conflicted merge is not a no-op.
-        return bool(tree) and tree == self.git("rev-parse", f"{base}^{{tree}}")
-
-    def git(self, *args):
-        proc = subprocess.run(
-            ["git", "-C", str(self.root), *args],
-            capture_output=True, text=True,
-        )
-        return proc.stdout.strip() if proc.returncode == 0 else ""
+        rc, out = self.git_rc("merge-tree", "--write-tree", base, ref)
+        if rc != 0 or not out:
+            return False          # conflict, or could not compute: report it
+        return out.splitlines()[0].strip() == self.git("rev-parse", f"{base}^{{tree}}")

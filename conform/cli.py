@@ -12,13 +12,15 @@ import json
 import sys
 from pathlib import Path
 
-from .context import Context, LiveGitHub, NoGitHub, StaticGitHub
-from .model import Status
+from .context import (Context, GitError, GitHubUnavailable, LiveGitHub,
+                       NoGitHub, StaticGitHub)
+from .model import Finding, Status
 from .rules import RULES
 
 COLOR = {
     Status.PASS: "\033[32m", Status.FAIL: "\033[31m",
-    Status.PENDING: "\033[35m", Status.EXCEPTION: "\033[36m", Status.NOT_APPLICABLE: "\033[90m",
+    Status.PENDING: "\033[35m", Status.EXCEPTION: "\033[36m",
+    Status.ERROR: "\033[31;1m", Status.NOT_APPLICABLE: "\033[90m",
     Status.UNCHECKABLE: "\033[33m",
 }
 
@@ -81,10 +83,10 @@ def main(argv=None):
                     default=Path(__file__).resolve().parent.parent / "exceptions.json",
                     help="recorded exceptions, keyed by OWNER/REPO")
     ap.add_argument("--allow-unchecked", action="store_true",
-                    help="exit 0 despite UNCHECKABLE rules. They are still "
-                         "printed as UNCHECKABLE; this only affects exit status. "
-                         "For CI without an admin token, where the "
-                         "GitHub-dependent rules cannot run.")
+                    help="exit 0 despite UNCHECKABLE rules (inputs unavailable, "
+                         "e.g. CI without an admin token). Still printed as "
+                         "UNCHECKABLE. NEVER tolerates ERROR: a crashing rule is "
+                         "a broken checker, not an unavailable input.")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--no-color", action="store_true")
     a = ap.parse_args(argv)
@@ -108,9 +110,22 @@ def main(argv=None):
     for r in RULES:
         try:
             f = r.check(ctx)
-        except Exception as exc:  # a crashing rule is never a pass
-            from .model import Finding
-            f = Finding(r.rule_id, Status.UNCHECKABLE, f"rule raised {type(exc).__name__}: {exc}")
+        except (GitError, GitHubUnavailable, OSError, UnicodeError) as exc:
+            # An input could not be READ. The rule did not run, and the fault
+            # is the input's, not the checker's. OSError is included
+            # deliberately: a PermissionError on a pbxproj is an unreadable
+            # input, and labelling it a checker bug would repeat the original
+            # sin here -- blaming the wrong thing for a failed read. Both
+            # statuses are non-green, so this only affects attribution.
+            f = Finding(r.rule_id, Status.UNCHECKABLE, f"{type(exc).__name__}: {exc}")
+        except Exception as exc:
+            # The rule itself is broken. Distinct from UNCHECKABLE because a
+            # crashing rule must never be tolerable, even with
+            # --allow-unchecked.
+            import traceback
+            f = Finding(r.rule_id, Status.ERROR,
+                        f"rule raised {type(exc).__name__}: {exc}",
+                        evidence="".join(traceback.format_exc().splitlines(True)[-3:]).rstrip())
         findings.append((r, f))
 
     if a.json:
@@ -127,11 +142,13 @@ def main(argv=None):
             for line in (f.evidence.splitlines() if f.evidence else []):
                 print(f"                   | {line}")
         n_fail = sum(1 for _, f in findings if f.is_violation)
-        print(f"  -- {n_fail} violation(s) of {len(findings)} rule(s)")
+        n_err = sum(1 for _, f in findings if f.status is Status.ERROR)
+        extra = f", {n_err} ERROR (checker bug)" if n_err else ""
+        print(f"  -- {n_fail} violation(s) of {len(findings)} rule(s){extra}")
 
     def counts(f):
-        if f.status is Status.FAIL:
-            return True
+        if f.status in (Status.FAIL, Status.ERROR):
+            return True          # ERROR is never tolerable
         if f.status is Status.UNCHECKABLE:
             return not a.allow_unchecked
         return False

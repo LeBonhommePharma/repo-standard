@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from ..context import GitHubUnavailable
+from ..context import GitError, GitHubUnavailable
 from ..model import Finding, Rule, Status
 
 RULES = []
@@ -209,11 +209,22 @@ def privacy_guard_covers_all(ctx):
       basis="evidence")
 def no_stranded_branches(ctx):
     rid = "BRANCH-001"
+    # This rule genuinely needs history and remote refs, so it says so rather
+    # than assuming a default. In a shallow or ref-less checkout it would
+    # otherwise iterate zero branches and report "no stranded branches" --
+    # green, having looked at nothing.
+    if ctx.git("rev-parse", "--is-shallow-repository") == "true":
+        return unknown(rid, "shallow clone: cannot compare branches. "
+                            "This rule requires fetch-depth: 0")
+    refs = ctx.git("branch", "-r", "--format=%(refname:short)").splitlines()
+    base = f"origin/{ctx.default_branch}"
+    if base not in [r.strip() for r in refs]:
+        return unknown(rid, f"{base} is not present in this checkout: cannot "
+                            f"determine what is ahead of it. Requires fetch-depth: 0")
     try:
         prs = ctx.github.open_pr_head_refs()
     except GitHubUnavailable as exc:
         return unknown(rid, f"could not list open PRs: {exc}")
-    refs = ctx.git("branch", "-r", "--format=%(refname:short)").splitlines()
     stranded = []
     for r in refs:
         r = r.strip()
@@ -326,48 +337,58 @@ def one_bundle_id_per_app(ctx):
 
 
 # ---------------------------------------------------------------- DECIDE-001
-@rule("DECIDE-001", "Decisions are recorded on the default branch", basis="evidence")
+@rule("DECIDE-001", "Decisions are recorded in a doc that lands on the default branch",
+      basis="evidence")
 def decisions_recorded(ctx):
+    """Reads the WORKING TREE, deliberately -- not `main` at HEAD.
+
+    The question is "will this hold after merge?", and on a PR that is the
+    merge result, which is what is checked out. Reading `main` at HEAD would
+    fail the very PR that adds the decision doc -- punishing the change that
+    fixes the violation, which trains everyone to ignore the rule.
+
+    Reading the working tree is also structurally incapable of the
+    missing-ref failure: no `git show`, no ref resolution, no dependency on a
+    local default branch existing. Correct on a PR, on a push, and on a
+    shallow detached checkout alike.
+    """
     rid = "DECIDE-001"
-    files, _ = ctx.default_tree()
-    if files is None:
-        return unknown(rid, f"could not list the tree of {ctx.default_branch}")
-    # A decision log is any tracked file whose name says it records decisions.
+    files = ctx.tracked_files()          # raises GitError -> ERROR, never a skip
     log = re.compile(r"(DECISIONS|ADR|decisions?)[^/]*\.md$|/adr/|(^|/)docs/decisions/", re.I)
     found = sorted(f for f in files if log.search(f))
     if not found:
-        return bad(rid,
-                   f"no decision log on {ctx.default_branch}: a determination that "
-                   f"lives only in a chat session or on an unmerged branch is not recorded")
-    # A log that records nothing is not a log.
+        return bad(rid, "no decision log tracked: a determination that lives only "
+                        "in a chat session or on an unmerged branch is not recorded")
+    incomplete = []
     for f in found:
-        body = ctx.show_on_default(f)
+        try:
+            body = ctx.read_text(f)
+        except OSError as exc:
+            # Tracked but unreadable is an unreadable input, not "no decision".
+            return unknown(rid, f"{f} is tracked but could not be read: {exc}")
         if re.search(r"decided[ -]?by", body, re.I) and re.search(r"\d{4}-\d{2}-\d{2}", body):
-            return ok(rid, f"decision log on {ctx.default_branch}: {f}")
-    return bad(rid,
-               f"decision log(s) present but none record who decided and when",
-               ev="\n".join(found))
+            return ok(rid, f"decision log records who and when: {f}")
+        incomplete.append(f)
+    return bad(rid, "decision log(s) tracked but none record who decided and when",
+               ev="\n".join(incomplete))
 
 
 # ---------------------------------------------------------------- OUT-001
 @rule("OUT-001", "Conformance output is not published", basis="evidence")
 def conformance_output_not_public(ctx):
-    rid = "OUT-001"
-    # A gap report names which repos lack protection, which guards do not
-    # check anything, and where work is stranded. That is an inventory of soft
-    # spots. The value is in the tool, not in the findings, and the findings
-    # have a blast radius the tool does not.
-    report = re.compile(r"(CONFORMANCE|gap[-_]?report|conformance[-_]?report)", re.I)
-    tracked, _ = ctx.default_tree()
-    if tracked is None:
-        return unknown(rid, f"could not list the tree of {ctx.default_branch}")
+    """Working tree, not `main` at HEAD.
 
-    committed = sorted(f for f in tracked if report.search(f))
+    Same reasoning as DECIDE-001 inverted: a PR that ADDS a gap report must be
+    caught here, not excused because main happens to be clean.
+    """
+    rid = "OUT-001"
+    report = re.compile(r"(CONFORMANCE|gap[-_]?report|conformance[-_]?report)", re.I)
+    committed = sorted(f for f in ctx.tracked_files() if report.search(f))
     if committed:
-        return bad(rid, f"{len(committed)} conformance report(s) committed",
+        return bad(rid, f"{len(committed)} conformance report(s) tracked",
                    ev="\n".join(committed))
 
-    # Also: a public workflow must not emit another repo's conformance results.
+    # A public workflow must not emit another repo's conformance results.
     leaks = []
     for p in ctx.glob("*.yml"):
         if ".github/workflows" not in str(p):
@@ -375,30 +396,10 @@ def conformance_output_not_public(ctx):
         for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
             if "conform" not in line or line.lstrip().startswith("#"):
                 continue
-            # Running the checker against this repo is fine; against a path
-            # that is not this repo is a public emission of someone else's gap.
             m = re.search(r"-m\s+conform\s+(\S+)", line)
             if m and m.group(1) not in (".", "${{", "$GITHUB_WORKSPACE"):
                 leaks.append(f"{p.name}:{i}: checks {m.group(1)}, not this repo")
     if leaks:
         return bad(rid, "workflow emits conformance output for another repo",
                    ev="\n".join(leaks))
-    return ok(rid, "no conformance report committed; CI checks only this repo")
-
-
-# ---------------------------------------------------------------- DOCS-001
-@rule("DOCS-001", "The standard/spec lives on the default branch", basis="evidence")
-def spec_on_default_branch(ctx):
-    rid = "DOCS-001"
-    on_main, _ = ctx.default_tree()
-    if on_main is None:
-        return unknown(rid, f"could not list the tree of {ctx.default_branch}")
-    docs = {str(p.relative_to(ctx.root)) for p in ctx.glob("*.md")}
-    docs = {d for d in docs if d.lower().startswith(("docs/", "readme"))}
-    if not docs:
-        return na(rid, "no docs/ or README in the working tree")
-    missing = sorted(docs - on_main)
-    if missing:
-        return bad(rid, f"{len(missing)} doc(s) exist in the tree but not on {ctx.default_branch}",
-                   ev="\n".join(missing))
-    return ok(rid, f"all {len(docs)} doc(s) reachable from {ctx.default_branch}")
+    return ok(rid, "no conformance report tracked; CI checks only this repo")

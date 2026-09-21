@@ -6,6 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Full history: BRANCH-001 declares it needs fetch-depth 0, so give it one
+  # environment where it can actually run.
   conform:
     runs-on: ubuntu-latest
     steps:
@@ -17,14 +19,62 @@ jobs:
           python-version: '3.12'
       - run: pip install pyyaml
 
-      - name: Prove every rule can fire red and green
+      - name: Prove every rule fires red and green, incl. PR-checkout and fault injection
         run: python3 fixtures/prove.py
 
-      # OUT-001: this job checks THIS repo and nothing else. A public workflow
-      # must never emit conformance output for another repo.
+      # OUT-001: checks THIS repo and nothing else. A public workflow must
+      # never emit conformance output for another repo.
+      #
+      # --allow-unchecked, not "|| true": the GitHub-dependent rules need a
+      # token this job does not have, so they print UNCHECKABLE without setting
+      # the exit status. Any FAIL still fails the build, and an ERROR (a
+      # crashing rule) fails it regardless of this flag.
       - name: This repo conforms to its own standard
-        # --allow-unchecked, not "|| true": the GitHub-dependent rules need an
-        # admin token this job does not have, so they print UNCHECKABLE and do
-        # not set the exit status. Any real FAIL still fails the build. They are
-        # verified locally against the live API.
         run: python3 -m conform . --offline --allow-unchecked
+
+  # The shape that hid the bug: shallow, no full history. Nothing exercised
+  # this path before, which is exactly why a rule that assumed a local `main`
+  # survived. If the only way the checker runs is the way that works, the bug
+  # class recurs and nothing catches it.
+  conform-shallow-checkout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyyaml
+
+      - name: Checkout shape
+        run: |
+          echo "shallow: $(git rev-parse --is-shallow-repository)"
+          echo "HEAD:    $(git rev-parse --abbrev-ref HEAD)"
+          echo "remote refs: $(git branch -r --format='%(refname:short)' | tr '\n' ' ')"
+
+      # No --allow-unchecked here on purpose for the rules that CAN run: this
+      # job must prove the checker behaves correctly under a shallow checkout
+      # rather than erroring or silently passing. Rules needing history report
+      # UNCHECKABLE, which is tolerated; a crash is not.
+      - name: Checker behaves correctly under a shallow checkout
+        run: python3 -m conform . --offline --allow-unchecked
+
+      - name: A crashing rule must turn the run red even here
+        run: |
+          python3 - <<'PY'
+          import subprocess, sys
+          inject = (
+              "import conform.rules as R\n"
+              "def boom(ctx): raise RuntimeError('injected')\n"
+              "for r in R.RULES:\n"
+              "    if r.rule_id == 'PRIV-001': r.check = boom\n"
+              "import conform.cli as C, sys; sys.exit(C.main(sys.argv[1:]))\n")
+          p = subprocess.run([sys.executable, "-c", inject, ".", "--offline",
+                              "--allow-unchecked", "--no-color"],
+                             capture_output=True, text=True)
+          print(p.stdout)
+          assert p.returncode != 0, "FAIL: a crashing rule did not fail the run"
+          assert "ERROR" in p.stdout, "FAIL: crash not reported as ERROR"
+          print("ok: injected exception turned the run red")
+          PY

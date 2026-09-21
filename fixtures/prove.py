@@ -193,5 +193,132 @@ def main():
             print(run(root, data, pending))
 
 
+
+
+
+# ===================================================================
+# Targeted scenarios for the failure modes that actually shipped.
+# ===================================================================
+
+def _seed(root: Path, decisions):
+    root.mkdir(parents=True, exist_ok=True)
+    base_repo(root)
+    (root / "docs").mkdir()
+    (root / "README.md").write_text("# r\n")
+    if decisions is not None:
+        (root / "docs/DECISIONS.md").write_text(decisions)
+    commit(root, "seed")
+    return root
+
+
+def decide_scenarios():
+    """DECIDE-001: absent -> red, incomplete -> red, complete -> green."""
+    cases = [
+        ("doc absent", None, "FAIL"),
+        ("doc present, no decision recorded", "# Decisions\n\nNothing yet.\n", "FAIL"),
+        ("doc present and complete",
+         "# Decisions\n\n## X\n\nDecided by: LP\nDate: 2026-09-21\n\nWhy: reasons.\n", "PASS"),
+    ]
+    print("=" * 68)
+    print("DECIDE-001 SCENARIOS")
+    print("=" * 68)
+    for label, body, expect in cases:
+        with tempfile.TemporaryDirectory() as td:
+            root = _seed(Path(td) / "r", body)
+            out = run(root, {"default_branch": "main"}, False)
+            line = next(l for l in out.splitlines() if "DECIDE-001" in l)
+            got = line.split()[0]
+            flag = "ok" if got == expect else "UNEXPECTED"
+            print(f"  [{flag}] {label:<36} -> {line.strip()}")
+
+
+def pr_checkout_scenario():
+    """The exact condition that broke: a CI checkout of a PR branch.
+
+    Shallow (depth 1), detached HEAD, no local `main`, no `origin/main`.
+    Built by fetching a single ref from a bare origin, which is what
+    actions/checkout does for a pull_request event.
+    """
+    print("=" * 68)
+    print("PR CHECKOUT: shallow, detached, no local or remote `main`")
+    print("=" * 68)
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        origin = td / "origin.git"
+        work = td / "seed"
+        _seed(work, "# Decisions\n\n## X\n\nDecided by: LP\nDate: 2026-09-21\n\nWhy: y.\n")
+        (work / ".github/workflows").mkdir(parents=True)
+        (work / ".github/workflows/ci.yml").write_text(
+            "name: ci\non:\n  push:\njobs:\n  c:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: true\n")
+        commit(work, "ci")
+        git(work, "checkout", "-q", "-b", "pr-branch")
+        (work / "docs/note.md").write_text("# pr adds a doc\n")
+        commit(work, "pr work")
+        subprocess.run(["git", "clone", "-q", "--bare", str(work), str(origin)], check=True)
+
+        co = td / "checkout"
+        co.mkdir()
+        git(co, "init", "-q")
+        git(co, "remote", "add", "origin", str(origin))
+        git(co, "fetch", "-q", "--depth", "1", "origin", "pr-branch")
+        git(co, "checkout", "-q", "--detach", "FETCH_HEAD")
+
+        print(f"  shallow={git_out(co, 'rev-parse', '--is-shallow-repository')}  "
+              f"HEAD={git_out(co, 'rev-parse', '--abbrev-ref', 'HEAD')}  "
+              f"local branches={git_out(co, 'branch', '--format=%(refname:short)') or '(none)'}  "
+              f"remote refs={git_out(co, 'branch', '-r', '--format=%(refname:short)') or '(none)'}")
+        print()
+        print(run(co, {"default_branch": "main", "branch_protection": {"main": {"x": 1}},
+                       "rulesets": [], "open_pr_head_refs": [], "workflow_runs_exist": True},
+                  False))
+
+
+def injected_error_scenario():
+    """Meta-check: a rule that raises must turn the run red, not green.
+
+    Without this, every rule is potentially a check that cannot fail and none
+    of the others mean anything. Also asserts --allow-unchecked does NOT
+    rescue an ERROR.
+    """
+    print("=" * 68)
+    print("INJECTED EXCEPTION: a crashing rule must fail the run")
+    print("=" * 68)
+    inject = (
+        "import conform.rules as R\n"
+        "def boom(ctx):\n"
+        "    raise RuntimeError('deliberate fault injected into PRIV-001')\n"
+        "for r in R.RULES:\n"
+        "    if r.rule_id == 'PRIV-001':\n"
+        "        r.check = boom\n"
+        "import conform.cli as C, sys\n"
+        "sys.exit(C.main(sys.argv[1:]))\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        root = _seed(Path(td) / "r",
+                     "# Decisions\n\nDecided by: LP\nDate: 2026-09-21\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"default_branch": "main"}, fh)
+            dp = fh.name
+        for extra in ([], ["--allow-unchecked"]):
+            p = subprocess.run(
+                [sys.executable, "-c", inject, str(root), "--github-data", dp,
+                 "--no-color", *extra],
+                capture_output=True, text=True, cwd=HERE)
+            label = "with --allow-unchecked" if extra else "default"
+            line = next((l for l in p.stdout.splitlines() if "PRIV-001" in l), "(missing)")
+            red = "RED (correct)" if p.returncode != 0 else "GREEN (WRONG)"
+            print(f"  {label:<22} exit={p.returncode}  {red}")
+            print(f"    {line.strip()}")
+
+
+def git_out(root, *a):
+    return subprocess.run(["git", "-C", str(root), *a],
+                          capture_output=True, text=True).stdout.strip().replace("\n", ",")
+
+
 if __name__ == "__main__":
     main()
+    decide_scenarios()
+    pr_checkout_scenario()
+    injected_error_scenario()

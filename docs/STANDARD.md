@@ -24,6 +24,39 @@ unresolved, and uniformizing onto the wrong canonical is worse than the drift.
 | DECIDE-001 | Decisions are recorded on the default branch | evidence |
 | OUT-001 | Conformance output is not published | evidence |
 
+**Twelve rules, not thirteen.** `DOCS-001` was dropped — see *Rules deliberately
+left out*.
+
+## The central invariant
+
+**An unreadable input is a failure, never a skip.** No bare `except: pass`, no
+`if not found: return ok`, no defaulting to conforming. A read that fails raises;
+`Context.git()` raises `GitError` rather than returning `""`, because a rule that
+cannot distinguish "no output" from "the command failed" will eventually report
+one as the other. Both happened here — see *Reading the default branch*.
+
+Five statuses are non-green: `FAIL`, `UNCHECKABLE` (inputs unreadable),
+`ERROR` (the rule itself raised), `EXCEPTION` and `PENDING`. `--allow-unchecked`
+tolerates `UNCHECKABLE` only; an `ERROR` fails the run regardless, because if a
+crashing rule could be tolerated then every rule is potentially a check that
+cannot fail and none of the others mean anything. `fixtures/prove.py` injects a
+deliberate exception on every run and asserts the run goes red.
+
+## Reading the default branch
+
+Rules that ask "is this recorded?" read the **working tree**, not a ref.
+
+On a pull request the working tree is the merge result, which is what the
+question actually means: *will this hold after merge?* Reading `main` at HEAD
+would fail the very PR that adds the decision doc — punishing the change that
+fixes the violation. It is also structurally incapable of the missing-ref
+failure: a CI checkout of a PR branch is shallow and detached, with no local
+`main`.
+
+A rule that genuinely needs history says so. `BRANCH-001` refuses to run on a
+shallow clone and reports `UNCHECKABLE` naming `fetch-depth: 0`, rather than
+iterating zero branches and reporting green having looked at nothing.
+
 `PRIV-001` is marked **speculative**: it is implemented and provable, but no
 repo scanned actually violates it. Every other rule has a live violation behind
 it.
@@ -192,7 +225,17 @@ open PR.
 against the set of open PR head refs. Counting commits catches *additive* edits
 to files that already exist on `main` — invisible to a missing-file search.
 
-**Observed violation.** 2026-09-21: FlexAIDdS 362 stranded branches, NATURaL 19
+**Requires full history.** On a shallow clone, or one without
+`origin/<default>`, this rule reports `UNCHECKABLE` naming `fetch-depth: 0`. It
+does not iterate zero branches and call that green.
+
+**A silent pass lived here.** Before `git()` raised, `git branch -r` failing
+returned `""`, the loop ran zero times, and the rule reported
+`PASS: "every branch ahead of main has an open PR"` — in a directory that was
+not a git repository at all. That is the check-that-cannot-fail this whole repo
+exists to eliminate, shipped inside it.
+
+**Observed violation.** 2026-09-21: FlexAIDdS 343 stranded branches, NATURaL 17
 (including `claude/pose-accent-ramp-brand-arc` at 40 commits and
 `codex/app-store-native-refinement-20260919` at 34), Shannon 5, Transit 4,
 BonhommeNotch 3, ClusterFuck 1.
@@ -268,14 +311,27 @@ that is invisible is indistinguishable from a rule that does not work.
 
 ---
 
-## DECIDE-001 — Decisions are recorded on the default branch
+## DECIDE-001 — Decisions are recorded in a doc that lands on the default branch
 
 **Asserts.** A decision log exists on the default branch and records who decided
 and when (a `decided by` attribution and an ISO date).
 
-**Checked by.** Listing the default branch's tree for a decision-log filename,
-then reading it from that branch — not from the working tree, which is the whole
-point: a log that exists only locally or on a branch is not recorded.
+**Checked by.** `git ls-files` for a tracked decision-log filename, then reading
+the file from the **working tree**. No `git show`, no ref resolution, no
+dependency on a local default branch existing.
+
+**The semantics were wrong before the mechanism was.** The first version read
+`main` at HEAD, which meant a PR adding the decision doc failed the check — the
+PR that fixes the violation punished for it. On a PR the working tree is the
+merge result, which answers the question the rule is actually asking.
+
+**What the old version did when the read failed.** It reported
+`FAIL: "decision log(s) present but none record who decided and when"` — on a
+repo whose log was present and complete. So it failed loudly rather than
+silently passing, which is the safe direction; but it blamed the content for an
+infrastructure failure, and the `try/except` around the read was dead code
+because `git()` returned `""` instead of raising. The same swallow produced a
+genuine silent pass in `BRANCH-001` — see that rule.
 
 **Observed violation.** Tonight the export-compliance determination was
 re-litigated from scratch because its reasoning lived on an unmerged branch.
@@ -305,22 +361,18 @@ not. Reports are generated locally to a gitignored path.
 
 ---
 
-## DOCS-001 — The standard/spec lives on the default branch
-
-**Asserts.** Every `docs/*.md` and `README*` in the working tree is reachable
-from the default branch.
-
-**Observed violation.** NATURaL, 5 docs unreachable from `main` (including
-`Docs/AppStore/colorset-dark-twins.md`); FlexAIDdS 4; Exergy 1.
-
-**Partially corrected.** PR #46 ported three stranded docs, but five remain, so
-the rule still fails on NATURaL — fewer than reported, not zero.
-
----
-
 ## Rules deliberately left out
 
 Written down so their absence is a decision, not an oversight.
+
+- **DOCS-001 — "docs are reachable from the default branch". Dropped.** Its
+  observed violation did not survive re-checking: NATURaL "failed" it with five
+  files, but the repo was checked out on `claude/measure-active-pose-render-latency`
+  — the PR branch that *ports those very docs to `main`*. The rule was measuring
+  which branch happened to be checked out, and reporting the PR that fixes the
+  problem as the violation. The genuine concern underneath it, work sitting on a
+  branch that is not heading for `main`, is already `BRANCH-001`. Removed rather
+  than repaired, because repairing it would have made it a duplicate.
 
 - **Export-compliance declaration.** `ITSAppUsesNonExemptEncryption` lives in a
   generated Info.plist for some targets, where its value is not present in any

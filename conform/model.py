@@ -1,9 +1,9 @@
 """Result model shared by every rule.
 
-A rule reports exactly one Status. There is deliberately no status that means
-"I could not check this, so assume fine": UNCHECKABLE and PENDING are both
-non-green, so a rule that cannot do its job can never be mistaken for a rule
-that did its job and found nothing.
+The central invariant: **an unreadable input is a failure, never a skip.**
+There is no status meaning "I could not check this, so assume fine". PENDING,
+EXCEPTION, UNCHECKABLE and ERROR are all non-green, so a rule that cannot do
+its job can never be mistaken for a rule that did its job and found nothing.
 """
 from __future__ import annotations
 
@@ -14,19 +14,28 @@ import enum
 class Status(enum.Enum):
     PASS = "PASS"
     FAIL = "FAIL"
-    # The rule is written and implemented but is gated off pending an external
-    # verification. Never green, never red -- it is not being applied.
-    PENDING = "PENDING"
-    # The rule could not run here because the repo lacks the inputs it reads
-    # (e.g. no Xcode project). Not a violation, but not a pass either.
-    NOT_APPLICABLE = "N/A"
-    # The rule is violated, and the violation has been granted an explicit,
-    # recorded exception. Deliberately NOT PASS: an exception you cannot see is
-    # indistinguishable from a rule that does not work.
+    # Violated, with an explicit recorded exception. Deliberately NOT PASS: an
+    # exception you cannot see is indistinguishable from a rule that does not
+    # work.
     EXCEPTION = "EXCEPTION"
-    # The inputs exist but could not be read (API denied, malformed file).
-    # This is loud on purpose: silence here is how checkers start lying.
+    # Written and implemented, but gated pending an external verification.
+    PENDING = "PENDING"
+    # The rule's inputs are absent from this repo (no Xcode project, no
+    # manifests). Not a violation -- but also not a pass.
+    NOT_APPLICABLE = "N/A"
+    # The inputs exist but could not be READ: API denied, git failed, file
+    # malformed. The rule did not run. Loud on purpose.
     UNCHECKABLE = "UNCHECKABLE"
+    # The rule itself raised. This is a bug in the checker, and it is kept
+    # distinct from UNCHECKABLE because an unavailable input can be tolerated
+    # deliberately (--allow-unchecked) while a crashing rule never can. If a
+    # crashing rule could be tolerated, every rule would be a check that cannot
+    # fail and none of the others would mean anything.
+    ERROR = "ERROR"
+
+
+# Statuses that mean "this rule did not produce a clean verdict".
+NON_GREEN = (Status.FAIL, Status.UNCHECKABLE, Status.ERROR)
 
 
 @dataclasses.dataclass
@@ -38,15 +47,15 @@ class Finding:
 
     @property
     def is_violation(self) -> bool:
-        return self.status in (Status.FAIL, Status.UNCHECKABLE)
+        return self.status in NON_GREEN
 
 
 @dataclasses.dataclass
 class Rule:
     rule_id: str
     title: str
-    # "evidence" = derived from an observed violation in this ecosystem.
-    # "speculative" = good practice, but no observed violation behind it.
+    # "evidence"    = derived from a violation observed in these repos.
+    # "speculative" = good practice, no observed violation behind it.
     basis: str
     check: object
     pending_reason: str = ""

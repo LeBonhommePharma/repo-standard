@@ -148,6 +148,15 @@ def make_good(root: Path):
     # local "main" does not. A rule that reads "main:<path>" instead of
     # "origin/main:<path>" passes locally and fails here.
     git(root, "branch", "-m", "main", "pr-branch")
+    # A squash-merged branch: ahead of origin/main in commits, no open PR, but
+    # contributing no diff. Must NOT be reported as stranded.
+    git(root, "checkout", "-q", "-b", "already-merged")
+    (root / "docs/app-store.md").write_text("# edited\n")
+    commit(root, "edit")
+    (root / "docs/app-store.md").write_text("# on main\n")
+    commit(root, "revert the edit")
+    git(root, "update-ref", "refs/remotes/origin/already-merged", "already-merged")
+    git(root, "checkout", "-q", "pr-branch")
     return {
         "branch_protection": {"main": {"required_pull_request_reviews": {}}},
         "rulesets": [],

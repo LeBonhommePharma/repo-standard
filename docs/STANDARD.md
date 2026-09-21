@@ -469,6 +469,18 @@ broken form and the real correct one, not from invented examples: the
 non-conforming fixture goes red on four sites, the conforming fixture — which
 carries all three correct idioms — stays green.
 
+**An unparseable file does not erase the files that were checked.** The first
+version returned `UNCHECKABLE` for the whole rule on the first `SyntaxError`.
+Run against FlexAIDdS, one unparseable vendored benchmark file
+(`tests/benchmarks/casf2016/docking_power.py`) made the rule report
+`UNCHECKABLE` and **hid all five live violations in the same repo**. That is the
+same shape as the bug the rule is about: an unrelated property of an unrelated
+file decided the answer. Now every file that cannot be read or parsed is
+recorded by name, and reported *alongside* the violations rather than instead of
+them — `FAIL` when there are hits, `UNCHECKABLE` when there are none and
+coverage was incomplete, `PASS` only when every file parsed. Loud about the
+violations and about the coverage gap, never one at the cost of the other.
+
 **Why it is not a style rule.** `result.csv` carries `pdb_id`. The directory is
 whatever the run wrote into. Copy a campaign directory, re-stage one target
 under a new name, re-run into a dated folder, and the derived key silently

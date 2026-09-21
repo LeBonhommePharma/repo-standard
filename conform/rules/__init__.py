@@ -592,28 +592,48 @@ def identity_not_derived_from_location(ctx):
     if not sources:
         return na(rid, "no Python sources in this repo")
 
-    hits = []
+    hits, unread = [], []
     for p in sources:
         rel = str(p.relative_to(ctx.root))
         try:
             src = p.read_text(errors="replace")
         except OSError as exc:
-            # Unreadable input is a failure, never a skip.
-            return unknown(rid, f"{rel} could not be read: {exc}")
+            unread.append(f"{rel}: could not be read: {exc}")
+            continue
         try:
             found = list(_scan_identity_from_location(src, rel))
         except SyntaxError as exc:
             # A file this checker cannot parse is a file it did not check.
-            # Saying so is the point; skipping it quietly is the bug class.
-            return unknown(rid, f"{rel} is not parseable Python: {exc}")
+            # Recorded, never silently skipped -- but it does not erase the
+            # files that WERE checked. Returning UNCHECKABLE for the whole rule
+            # here let one unparseable vendored test file hide five live
+            # violations in the same repo, which is the same shape of bug the
+            # rule is about: an unrelated property deciding the answer.
+            unread.append(f"{rel}: not parseable Python: {exc}")
+            continue
         for line, name, idiom, why in found:
             hits.append(f"{rel}:{line}: {name} = {idiom} -- {why}")
 
+    tail = ([f"-- {len(unread)} file(s) NOT CHECKED (unreadable/unparseable):"]
+            + unread) if unread else []
+
     if hits:
+        # A FAIL that also names what could not be parsed: loud about the
+        # violations AND about the coverage gap. Both, never one at the cost
+        # of the other.
         return bad_or_excepted(
             ctx, rid,
             f"{len(hits)} identity/identities derived from a path component while "
             f"a record carrying an explicit ID is in scope; a re-rooted, copied or "
-            f"re-staged artifact resolves to the wrong entity without erroring",
-            ev="\n".join(hits))
+            f"re-staged artifact resolves to the wrong entity without erroring"
+            + (f" [{len(unread)} further file(s) could not be parsed]" if unread else ""),
+            ev="\n".join(hits + tail))
+    if unread:
+        # No violations among the files that parsed -- but the rule did not
+        # see every file, so this is not a pass.
+        return Finding(
+            rid, Status.UNCHECKABLE,
+            f"no violation in {len(sources) - len(unread)} file(s), but "
+            f"{len(unread)} file(s) could not be parsed and were not checked",
+            "\n".join(unread))
     return ok(rid, f"no identity derived from a path component ({len(sources)} file(s) parsed)")

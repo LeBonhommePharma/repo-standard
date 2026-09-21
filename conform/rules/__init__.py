@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import ast
 import re
 
 from ..context import GitError, GitHubUnavailable
 from ..model import Finding, Rule, Status
 
 RULES = []
+
+# Rules that are part of the standard and are deliberately NOT implemented.
+#
+# Both resist automation for the same reason, and it is the reason the rules
+# exist. GATE-001 asks whether a guard sits where everything passes through;
+# answering it means searching for the underlying PRIMITIVE, not the facade
+# the guard is written against -- and a checker that inspected the facade
+# would be GATE-001's own bug wearing GATE-001's clothes. XKEY-001 asks
+# whether two channels are INDEPENDENT; a checker cannot tell two genuinely
+# separate resolution paths from two that both bottom out in the same one.
+#
+# A shallow proxy here would be worse than nothing: it would report green over
+# exactly the condition the rule is about. They are documented review steps
+# with exact search commands, named on every run so a clean report never
+# implies they were checked.
+HUMAN_ONLY = ("GATE-001", "XKEY-001")
 
 
 def rule(rule_id, title, basis, pending_reason=""):
@@ -403,3 +420,200 @@ def conformance_output_not_public(ctx):
         return bad(rid, "workflow emits conformance output for another repo",
                    ev="\n".join(leaks))
     return ok(rid, "no conformance report tracked; CI checks only this repo")
+
+
+# ================================================================= IDKEY-001
+#
+# Invariance mismatch: a lookup key that is not invariant under the
+# transformations the system applies to the thing it identifies.
+#
+# For a key K identifying an entity E, enumerate the transformations T the
+# system performs on E. K is sound iff K(T(E)) == K(E) for every T. A path
+# component fails this the moment anything copies, re-roots, stages, archives
+# or re-runs the artifact into a differently named directory -- and it fails
+# SILENTLY, resolving to a real-looking wrong identity instead of raising.
+# That is what makes the class dangerous: a bad key does not error, it
+# succeeds against the wrong entity.
+
+# Names that mean "this variable is an identity", not merely a label.
+_ID_NAME = re.compile(
+    r"^(_*)(pdb|pid|uid|rid|sid|key|id|ident|identifier|"
+    r"[a-z0-9]+_(id|ids|key|uuid|slug|code)|"
+    r"(pdb|target|ligand|receptor|entry|record|sample|run|job|case)(_?(id|name|code))?)$",
+    re.I)
+
+# Keys a record uses to carry its own explicit identity.
+_ID_KEY = re.compile(r"^(id|uuid|slug|code|[a-z0-9_]*_(id|uuid|slug|code)|"
+                     r"(pdb|target|ligand|receptor|entry|sample|run|job|case)_?id)$", re.I)
+
+# Files that ARE records: if you are standing on one of these, it carries the
+# identity and the directory around it does not have to.
+_RECORD_FILE = re.compile(r"\.(csv|tsv|json|jsonl|ya?ml|parquet|sdf|xml)\b", re.I)
+_RECORD_READER = ("DictReader", "read_csv", "read_json", "read_parquet",
+                  "safe_load", "load", "loads")
+
+
+def _path_component_expr(node):
+    """Describe node if it derives a value from a PATH COMPONENT, else None.
+
+    Three idioms, all of them observed live:
+      os.path.basename(os.path.dirname(p))   -- the containing directory's name
+      p.parent.name / p.parents[n].name      -- same, pathlib
+      str(p).split("/")[-2]                  -- same, by hand
+    """
+    # <expr>.parent.name  /  <expr>.parents[i].name
+    if isinstance(node, ast.Attribute) and node.attr == "name":
+        inner = node.value
+        if isinstance(inner, ast.Subscript):
+            inner = inner.value
+        if isinstance(inner, ast.Attribute) and inner.attr in ("parent", "parents"):
+            return f".{inner.attr}.name"
+    if isinstance(node, ast.Call):
+        fn = node.func
+        fname = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+        # basename(dirname(x)) -- basename(x) alone names the FILE, which is a
+        # different (and often legitimate) thing, so only the nested form counts.
+        if fname == "basename" and node.args:
+            a0 = node.args[0]
+            if isinstance(a0, ast.Call):
+                inner = a0.func
+                iname = inner.attr if isinstance(inner, ast.Attribute) else getattr(inner, "id", "")
+                if iname == "dirname":
+                    return "os.path.basename(os.path.dirname(...))"
+    # split("/")[-2] and friends: an index into path components.
+    if isinstance(node, ast.Subscript):
+        val = node.value
+        if isinstance(val, ast.Call) and isinstance(val.func, ast.Attribute) \
+                and val.func.attr == "split" and val.args \
+                and isinstance(val.args[0], ast.Constant) and val.args[0].value in ("/", "\\"):
+            return "split('/')[...]"
+        if isinstance(val, ast.Attribute) and val.attr == "parts":
+            return ".parts[...]"
+    return None
+
+
+def _record_lookup(node):
+    """True if node reads an explicit ID field out of a record."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) \
+                and sub.func.attr == "get" and sub.args \
+                and isinstance(sub.args[0], ast.Constant) \
+                and isinstance(sub.args[0].value, str) and _ID_KEY.match(sub.args[0].value):
+            return True
+        if isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Constant) \
+                and isinstance(sub.slice.value, str) and _ID_KEY.match(sub.slice.value):
+            return True
+    return False
+
+
+def _record_in_scope(scope):
+    """Is an explicit-ID-carrying record available where this key was derived?
+
+    Either the scope reads an ID field off a record somewhere (so the records
+    demonstrably carry one), or it iterates/parses record files (so one is
+    there to be read). Without this the rule would flag every legitimate use
+    of a directory name -- when there is genuinely no record, a path component
+    may be the only identity available, and that is not this bug.
+    """
+    for sub in ast.walk(scope):
+        if _record_lookup(sub):
+            return "a record field carrying an explicit ID is read in this scope"
+        if isinstance(sub, ast.Call):
+            fn = sub.func
+            fname = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            if fname in _RECORD_READER:
+                return f"this scope parses records ({fname})"
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                and _RECORD_FILE.search(sub.value):
+            return f"this scope iterates record files ({sub.value!r})"
+    return None
+
+
+def _scan_identity_from_location(src, path_label):
+    """Yield (line, name, idiom, why) for every identity derived from a path."""
+    tree = ast.parse(src, filename=path_label)
+    scopes = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module))]
+    # A site inside a function is reachable from the module scope too; report
+    # it once. Keyed by (line, name) -- one source line is one site.
+    seen = set()
+    for scope in scopes:
+        why = _record_in_scope(scope)
+        if not why:
+            continue
+        for node in ast.walk(scope):
+            # Only this scope's own statements -- a nested def is its own scope
+            # and gets visited on its own pass.
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                value = node.value
+            elif isinstance(node, ast.keyword) and node.arg and _ID_KEY.match(node.arg):
+                targets, value = [ast.Name(id=node.arg)], node.value
+            elif isinstance(node, ast.Dict):
+                for k, v in zip(node.keys, node.values):
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str) \
+                            and _ID_KEY.match(k.value) and not _record_lookup(v):
+                        for sub in ast.walk(v):
+                            idiom = _path_component_expr(sub)
+                            if idiom:
+                                site = (getattr(v, "lineno", k.lineno), k.value)
+                                if site not in seen:
+                                    seen.add(site)
+                                    yield (*site, idiom, why)
+                                break
+                continue
+            else:
+                continue
+            if value is None:
+                continue
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            if not any(_ID_NAME.match(n) for n in names):
+                continue
+            # `rec.get("pdb_id") or csv_path.parent.name` -- the record is the
+            # key, the path is a last-resort fallback. That is the CORRECT
+            # idiom, live in this ecosystem, and it must not be flagged.
+            if _record_lookup(value):
+                continue
+            for sub in ast.walk(value):
+                idiom = _path_component_expr(sub)
+                if idiom:
+                    site = (node.lineno, names[0])
+                    if site not in seen:
+                        seen.add(site)
+                        yield (*site, idiom, why)
+                    break
+
+
+@rule("IDKEY-001", "An identity is not derived from a path component when the "
+                   "record carries an explicit ID", basis="evidence")
+def identity_not_derived_from_location(ctx):
+    rid = "IDKEY-001"
+    sources = [p for p in ctx.glob("*.py")]
+    if not sources:
+        return na(rid, "no Python sources in this repo")
+
+    hits = []
+    for p in sources:
+        rel = str(p.relative_to(ctx.root))
+        try:
+            src = p.read_text(errors="replace")
+        except OSError as exc:
+            # Unreadable input is a failure, never a skip.
+            return unknown(rid, f"{rel} could not be read: {exc}")
+        try:
+            found = list(_scan_identity_from_location(src, rel))
+        except SyntaxError as exc:
+            # A file this checker cannot parse is a file it did not check.
+            # Saying so is the point; skipping it quietly is the bug class.
+            return unknown(rid, f"{rel} is not parseable Python: {exc}")
+        for line, name, idiom, why in found:
+            hits.append(f"{rel}:{line}: {name} = {idiom} -- {why}")
+
+    if hits:
+        return bad_or_excepted(
+            ctx, rid,
+            f"{len(hits)} identity/identities derived from a path component while "
+            f"a record carrying an explicit ID is in scope; a re-rooted, copied or "
+            f"re-staged artifact resolves to the wrong entity without erroring",
+            ev="\n".join(hits))
+    return ok(rid, f"no identity derived from a path component ({len(sources)} file(s) parsed)")

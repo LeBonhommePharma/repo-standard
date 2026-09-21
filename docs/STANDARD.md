@@ -1,6 +1,6 @@
 # The repo standard
 
-Ten rules. Each one exists because something in this ecosystem actually drifted,
+Fifteen rules. Each one exists because something in this ecosystem actually drifted,
 not because a style guide recommends it. Every rule is checked by parsing
 structure — never by matching substrings in a file's text, which is the specific
 bug that made the previous generation of guards unable to fail.
@@ -23,9 +23,41 @@ unresolved, and uniformizing onto the wrong canonical is worse than the drift.
 | BUNDLE-001 | One bundle identifier per app across platforms | evidence |
 | DECIDE-001 | Decisions are recorded on the default branch | evidence |
 | OUT-001 | Conformance output is not published | evidence |
+| IDKEY-001 | An identity is not derived from a path component | evidence |
+| GATE-001 | A capability guard sits at the narrowest waist | evidence, **human-checked** |
+| XKEY-001 | Two independent keys are read and asserted to agree | evidence, **human-checked** |
 
-**Twelve rules, not thirteen.** `DOCS-001` was dropped — see *Rules deliberately
-left out*.
+**Thirteen mechanically checked, two not.** `DOCS-001` was dropped — see *Rules
+deliberately left out*.
+
+## Mechanically enforced vs. documented-only
+
+This split is part of the standard, not a caveat on it.
+
+**Mechanically enforced (13).** PROT-001, CI-001, CI-002, GUARD-001, PRIV-001,
+PRIV-002, BRANCH-001, PLIST-001, SWIFT-001, BUNDLE-001, DECIDE-001, OUT-001,
+**IDKEY-001**. The checker runs them; `fixtures/prove.py` proves each fires red
+before its green means anything.
+
+**Documented-only, human review required (2).** **GATE-001** and **XKEY-001**.
+There is no code for these. `conform` prints them as `NOT CHECKED` on every
+run, including a clean one, so a green report never implies they were examined.
+
+They are not automated because automating them shallowly would reproduce the
+very bug each one describes:
+
+- A GATE-001 checker that confirmed the façade was guarded would be looking at
+  the façade — which is precisely GATE-001's failure mode. It would report
+  green over the bypass. In *this* repo, shipping that would be the worst
+  available outcome: a check that cannot fail, inside the standard that exists
+  to eliminate checks that cannot fail.
+- An XKEY-001 checker can see that two reads happen. It cannot see that they
+  are **independent**. Two channels that both bottom out in the same resolver
+  agree perfectly and verify nothing, which has already happened here.
+
+Each is shipped below with the exact commands a reviewer runs. A rule a human
+performs with a written procedure is enforcement; a rule a machine performs
+against the wrong object is theatre.
 
 ## The central invariant
 
@@ -358,6 +390,195 @@ spots, and a map for anyone who wants one. The same reasoning as not committing
 secrets — the value is in the tool, the blast radius is in the findings.
 Sharing a report later is trivial and reversible; un-publishing git history is
 not. Reports are generated locally to a gitignored path.
+
+---
+
+## The invariance-mismatch class
+
+IDKEY-001, GATE-001 and XKEY-001 are three instances of one pattern, all three
+observed on 2026-09-21.
+
+**A lookup key was used that is not invariant under the transformations the
+system actually applies to the thing being identified.**
+
+The criterion. For a key `K` identifying an entity `E`, enumerate the
+transformations `T` the system performs on `E` — copy, move, re-root, stage,
+archive, re-run, re-export, rename, merge, mirror. `K` is sound **iff
+`K(T(E)) == K(E)` for every `T`**. Any `T` that breaks the equality is a
+latent misidentification.
+
+**The class is dangerous because a bad key does not error — it succeeds against
+the wrong entity.** A missing key raises and gets fixed in minutes. A key that
+is merely *not invariant* returns a real-looking answer about something else,
+and every downstream number is confidently wrong. Nothing in a test suite fails
+until someone notices the result belongs to a different entity.
+
+The three instances differ only in what plays the part of `K`:
+
+| | `K` is | `T` that breaks it |
+|---|---|---|
+| IDKEY-001 | the directory an artifact happens to sit in | copy, re-root, re-stage, re-run into a new dir |
+| GATE-001 | the façade a capability is assumed to be reached through | any call path reaching the primitive directly |
+| XKEY-001 | one resolution channel, trusted alone | any transformation that channel is blind to |
+
+---
+
+## IDKEY-001 — An identity is not derived from a path component
+
+**Asserts.** No identifier is derived from a path component in a scope where a
+record carrying an explicit ID is available.
+
+**Checked by.** Parsing each `.py` file with `ast` — never by matching text —
+and reporting an assignment whose *target* names an identity (`pdb_id`, `pid`,
+`*_id`, `*_key`, …) and whose *value* derives from a path component, in a scope
+where a record with an explicit ID is in reach.
+
+Three idioms are recognised, all of them observed live:
+
+```
+os.path.basename(os.path.dirname(csv_path))   # the containing directory's name
+csv_path.parent.name / p.parents[n].name      # same, pathlib
+str(p).split('/')[-2]  /  Path(p).parts[-2]   # same, by hand
+```
+
+`os.path.basename(p)` **alone** is not flagged: naming the file is a different
+and often legitimate operation. Only the containing-directory forms count.
+
+**The condition matters.** The rule fires only where a record with an explicit
+ID is in scope — the scope reads an ID field off a record, parses records
+(`DictReader`, `read_csv`, `safe_load`, …), or iterates record files
+(`*/result.csv`). Where there genuinely is no record, a path component may be
+the only identity available, and that is not this bug. Without this condition
+the rule would flag every legitimate use of a directory name and be tuned off
+within a week.
+
+**The correct idiom is not flagged, and that is tested.** The record is the
+key; the path is a last-resort fallback:
+
+```python
+pdb_id = (rec.get("pdb_id") or csv_path.parent.name).strip()
+```
+
+**Observed violation.** `FlexAIDdS`, both sides of the same codebase.
+Broken form — `scripts/failure_classify.py:270`, `scripts/lib_launch.py:66`,
+`scripts/run_panel_native_cf_oracle.py:99`, `scripts/patch_bcr_from_poses.py:52`,
+`scripts/benchmark_ops_monitor.py:554`. Correct idiom, already live —
+`scripts/rmsd_symmcorr.py:304`, `scripts/benchmark_ops_monitor.py:412`,
+`scripts/bootstrap_3dsig_s_top10.py:334`. The fixture is built from the real
+broken form and the real correct one, not from invented examples: the
+non-conforming fixture goes red on four sites, the conforming fixture — which
+carries all three correct idioms — stays green.
+
+**Why it is not a style rule.** `result.csv` carries `pdb_id`. The directory is
+whatever the run wrote into. Copy a campaign directory, re-stage one target
+under a new name, re-run into a dated folder, and the derived key silently
+becomes a different target's ID while the row's own `pdb_id` still says what it
+always said. No exception is raised. The comparison just answers about the
+wrong molecule.
+
+---
+
+## GATE-001 — A capability guard sits at the narrowest waist
+
+**Documented-only. There is no checker for this rule.**
+
+**Asserts.** A guard restricting a capability sits where every path to that
+capability passes through, and the absence of a bypass is **demonstrated by
+searching for the underlying primitive**, not by confirming the intended façade
+is guarded.
+
+**Observed violation.** `MedicationTracker` reached `HKClinicalType` directly,
+bypassing `isClinicalMedicationTypeAvailable`. Gating the façade would have
+looked complete and done nothing: the availability check was real, correct, and
+not on the path anything actually took.
+
+**The review procedure.** Name the primitive, not the façade, and search for it:
+
+```sh
+# 1. Name the primitive the capability ultimately bottoms out in.
+#    Not the wrapper you wrote -- the type/symbol the platform provides.
+PRIMITIVE='HKClinicalType'
+FACADE='isClinicalMedicationTypeAvailable'
+
+# 2. Every call site of the primitive. This is the denominator.
+rg -n --no-heading "$PRIMITIVE" -g '!*Tests*' -g '!*.md'
+
+# 3. Every call site of the facade. This is what you THINK is the denominator.
+rg -n --no-heading "$FACADE"
+
+# 4. The bypasses: primitive reached without the facade anywhere in the file.
+for f in $(rg -l "$PRIMITIVE" -g '!*Tests*'); do
+  rg -q "$FACADE" "$f" || echo "BYPASS: $f reaches $PRIMITIVE, never calls $FACADE"
+done
+
+# 5. Same-file is necessary, not sufficient: confirm by reading that the guard
+#    dominates the call, rather than merely sharing a file with it.
+```
+
+**A review that only ran step 3 has not performed this check.** Step 2 is the
+rule. If the counts in steps 2 and 3 differ, the difference is the bypass set.
+
+**Why no checker.** A mechanical version would have to decide what the
+primitive is, and the only machine-available answer is the façade the code
+names — which is the object the bug is about. A checker that inspected the
+façade would report green over precisely this failure. Shipping that inside
+this repo would be a check that cannot fail, in the standard written to abolish
+them.
+
+---
+
+## XKEY-001 — Two independent keys are read and asserted to agree
+
+**Documented-only. There is no checker for this rule.**
+
+**Asserts.** Where an identity matters, two **independent** keys are read and
+asserted to agree, failing loudly on mismatch. Where only one channel exists,
+the result is recorded as **"single-channel, unverified"** — explicitly, in the
+output — rather than being presented as verified.
+
+**Independence is the whole rule.** Two verification methods in this project
+once agreed with each other while both resolved the entity by path. Agreement
+was guaranteed and meant nothing: one channel wearing a disguise. Two channels
+are independent only if there exists a transformation `T` that changes one
+key's answer and not the other's. If no such `T` exists, you have one channel
+counted twice.
+
+**The review procedure.**
+
+```sh
+# 1. Name both channels and the resolution each one bottoms out in.
+#    Write them down. "Two methods" is not the claim -- two RESOLUTIONS is.
+#
+#    e.g. channel A: row["pdb_id"] read from result.csv   (record content)
+#         channel B: SHA-256 of the pose file             (artifact content)
+#         -> independent: renaming the directory changes neither; swapping a
+#            file changes B and not A.
+#
+#    Counter-example, NOT independent:
+#         channel A: csv_path.parent.name
+#         channel B: work_dir.name
+#         -> both are the path. They agree always, and verify nothing.
+
+# 2. Prove independence by finding the transformation that separates them.
+#    If you cannot name a T that moves one and not the other, it is ONE key.
+
+# 3. Find the assertion. Agreement that is computed but not asserted is not a
+#    check -- confirm it FAILS, not warns.
+rg -n "mismatch|disagree|!=|assert" -- <the comparison site>
+
+# 4. Where only one channel exists, confirm the output says so, verbatim:
+rg -n "single-channel, unverified"
+```
+
+**The limit is part of the rule.** A single-channel result is not a failure —
+sometimes one channel is all there is. Presenting it as verified is the
+failure. It is recorded as `single-channel, unverified` so the distinction
+survives into whatever reads the output.
+
+**Why no checker.** A checker can see that two reads happen and that a
+comparison follows. It cannot see that the two reads are independent, which is
+the entire content of the rule. It would pass the exact case that already
+occurred here — two channels agreeing because they were one.
 
 ---
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from .context import (Context, GitError, GitHubUnavailable, LiveGitHub,
                        NoGitHub, StaticGitHub)
 from .model import Finding, Status
-from .rules import RULES
+from .rules import HUMAN_ONLY, RULES
 
 COLOR = {
     Status.PASS: "\033[32m", Status.FAIL: "\033[31m",
@@ -129,9 +129,10 @@ def main(argv=None):
         findings.append((r, f))
 
     if a.json:
-        print(json.dumps([{"rule": r.rule_id, "title": r.title, "basis": r.basis,
+        print(json.dumps({"checked": [{"rule": r.rule_id, "title": r.title, "basis": r.basis,
                            "status": f.status.value, "detail": f.detail,
-                           "evidence": f.evidence} for r, f in findings], indent=2))
+                           "evidence": f.evidence} for r, f in findings],
+                          "not_checked": list(HUMAN_ONLY)}, indent=2))
     else:
         use_color = not a.no_color and sys.stdout.isatty()
         print(f"conform: {a.repo}")
@@ -145,6 +146,11 @@ def main(argv=None):
         n_err = sum(1 for _, f in findings if f.status is Status.ERROR)
         extra = f", {n_err} ERROR (checker bug)" if n_err else ""
         print(f"  -- {n_fail} violation(s) of {len(findings)} rule(s){extra}")
+        # Printed on every run, including a clean one. A green report that
+        # silently omitted these would imply they had been checked. They have
+        # not been: nothing here looked at them.
+        print(f"  -- NOT CHECKED (human review required, see docs/STANDARD.md): "
+              f"{', '.join(HUMAN_ONLY)}")
 
     def counts(f):
         if f.status in (Status.FAIL, Status.ERROR):

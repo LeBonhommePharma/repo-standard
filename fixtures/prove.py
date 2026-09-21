@@ -79,9 +79,34 @@ def make_bad(root: Path):
         # (com.lebonhommepharma.exergy.pad). That registration is left alone;
         # only its shape is reproduced here.
         "\t\tPRODUCT_BUNDLE_IDENTIFIER = com.example.App.pad;\n")
+    # IDKEY-001: identity derived from a path component while the record that
+    # carries an explicit pdb_id is right there. Copied from the real broken
+    # form (FlexAIDdS scripts/failure_classify.py, lib_launch.py,
+    # run_panel_native_cf_oracle.py, patch_bcr_from_poses.py,
+    # benchmark_ops_monitor.py), not invented for the fixture.
+    (root / "scripts/collect_results.py").write_text(
+        "import os, csv, glob\n"
+        "\n"
+        "def load(result_dir):\n"
+        "    rows = {}\n"
+        '    for csv_path in sorted(glob.glob(os.path.join(result_dir, "*/result.csv"))):\n'
+        "        pdb_id = os.path.basename(os.path.dirname(csv_path))\n"
+        "        with open(csv_path, newline='') as fh:\n"
+        "            rows[pdb_id] = next(csv.DictReader(fh))\n"
+        "    return rows\n"
+        "\n"
+        "def panel(csvs):\n"
+        "    for rc in csvs:\n"
+        "        pdb = rc.parent.name\n"
+        '        yield {"pdb_id": rc.parent.name, "path": str(rc)}\n'
+        "\n"
+        "def patch(camp):\n"
+        '    for rcsv in sorted(camp.glob("*/result.csv")):\n'
+        "        pid = rcsv.parent.name\n"
+        "        yield pid\n")
+    (root / "docs").mkdir(exist_ok=True)
     # OUT-001: a committed gap report, and a workflow emitting another repo's
     # conformance output.
-    (root / "docs").mkdir(exist_ok=True)
     (root / "docs/CONFORMANCE-2026-01-01.md").write_text("| repo | PROT-001 |\n")
     (root / ".github/workflows/leak.yml").write_text(
         "name: leak\non:\n  pull_request:\njobs:\n  x:\n    runs-on: ubuntu-latest\n"
@@ -130,6 +155,27 @@ def make_good(root: Path):
         "for rel in ['App/PrivacyInfo.xcprivacy', 'MacApp/PrivacyInfo.xcprivacy']:\n"
         "    d = plistlib.load(open(rel, 'rb'))\n"
         "    assert d.get('NSPrivacyTracking') is False\n")
+    # IDKEY-001: the record is the key; the path component is a last-resort
+    # fallback only. This is the correct idiom already live in this ecosystem
+    # (FlexAIDdS scripts/rmsd_symmcorr.py:304, benchmark_ops_monitor.py:412,
+    # bootstrap_3dsig_s_top10.py:334) -- reproduced verbatim in shape so the
+    # rule is proven not to flag it.
+    (root / "scripts/collect_results.py").write_text(
+        "import csv\n"
+        "\n"
+        "def load(csv_path, recs):\n"
+        "    rec = recs[0]\n"
+        '    pdb_id = (rec.get("pdb_id") or csv_path.parent.name).strip()\n'
+        "    return pdb_id\n"
+        "\n"
+        "def row(path, r):\n"
+        '    return {"pdb_id": r.get("pdb_id") or path.parent.name}\n'
+        "\n"
+        "def top(rows, csv_path):\n"
+        "    row = rows[0]\n"
+        '    pdb = (row.get("pdb_id") or row.get("receptor_id")\n'
+        "           or csv_path.parent.name).upper()[:4]\n"
+        "    return pdb\n")
     (root / "App.xcodeproj").mkdir()
     (root / "App.xcodeproj/project.pbxproj").write_text(
         "\t\tINFOPLIST_FILE = App/Info.plist;\n"

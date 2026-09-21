@@ -226,8 +226,15 @@ def no_stranded_branches(ctx):
             continue
         name = r.split("/", 1)[1]
         n = ctx.git("rev-list", "--count", f"origin/{ctx.default_branch}..{r}")
-        if n.isdigit() and int(n) > 0 and name not in prs:
-            stranded.append((int(n), name))
+        if not (n.isdigit() and int(n) > 0) or name in prs:
+            continue
+        # Ahead in commits is not the same as carrying unmerged work. A
+        # squash-merged branch keeps its original commits, which are not
+        # ancestors of the default branch, while contributing no diff. That is
+        # merged work, not stranded work.
+        if not ctx.git("diff", f"origin/{ctx.default_branch}...{r}", "--name-only"):
+            continue
+        stranded.append((int(n), name))
     if stranded:
         stranded.sort(reverse=True)
         return bad(rid, f"{len(stranded)} branch(es) ahead of {ctx.default_branch} with no open PR",

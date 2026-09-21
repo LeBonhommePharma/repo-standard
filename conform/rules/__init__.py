@@ -515,15 +515,24 @@ def _record_in_scope(scope):
     of a directory name -- when there is genuinely no record, a path component
     may be the only identity available, and that is not this bug.
     """
-    for sub in ast.walk(scope):
+    nodes = list(ast.walk(scope))
+    # Strongest signal first, so the reason reported is the most informative
+    # one rather than whichever happened to come first in walk order.
+    for sub in nodes:
         if _record_lookup(sub):
             return "a record field carrying an explicit ID is read in this scope"
+    for sub in nodes:
         if isinstance(sub, ast.Call):
             fn = sub.func
             fname = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
             if fname in _RECORD_READER:
                 return f"this scope parses records ({fname})"
+    for sub in nodes:
+        # Short literals only: a docstring that happens to mention result.csv
+        # is prose, not a path, and quoting it whole makes the finding
+        # unreadable. A real path literal is short.
         if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                and len(sub.value) <= 80 and "\n" not in sub.value \
                 and _RECORD_FILE.search(sub.value):
             return f"this scope iterates record files ({sub.value!r})"
     return None

@@ -64,3 +64,5 @@ it is checked, the observed violation behind it, and where the fixture proves it
 fires. Rules with no observed violation are marked speculative: currently one,
 `PRIV-001`. The other twelve come from drift observed on 2026-09-21. Rules that were considered and
 deliberately left out are listed at the end, with the reason.
+
+<!-- protection probe -->

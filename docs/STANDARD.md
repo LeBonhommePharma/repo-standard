@@ -49,16 +49,29 @@ non-empty.
 list. The empty-include case is called out separately because it is the
 dangerous one: the UI reports the ruleset as enforcing while it governs no refs.
 
-**Observed violation.** 1 of 68 repos on the `LeBonhommePharma` account gate
-their default branch: only `NRGsuite`, on `master`.
+**Observed violation.** 4 of 68 repos gate their default branch: `NRGsuite`
+(classic, on `master`), `repo-standard` (classic), and
+`SymphonyInstrumentAnalysis` and `lebonhommepharma.github.io` (active rulesets
+on `~DEFAULT_BRANCH`, requiring PR and status checks). One more, `FlexAIDdS`,
+has an active ruleset with an empty include. The remaining 63 have nothing.
 
-**Corrected.** My own first scan reported *0 of 67*, and both numbers were
-wrong. It assumed every repo's default branch was `main`. In fact 46 use `main`,
-17 `master`, 2 `develop`, 2 `Bonhomme`, and one has none — so for 22 repos it
-was querying protection on a branch that does not exist and reading the 404 as
-"unprotected". The checker now resolves the default branch from the remote
-before asking, and `NRGsuite` passes. This is the same stale-observation failure
-the standard exists to prevent, committed by the checker itself.
+**Corrected twice — both times my own scan, not the repos.**
+
+1. The first scan reported *0 of 67*. It assumed every repo's default branch was
+   `main`. In fact 46 use `main`, 17 `master`, 2 `develop`, 2 `Bonhomme`, and one
+   has none — so for 22 repos it queried protection on a branch that does not
+   exist and read the 404 as "unprotected".
+2. The second reported *1 of 68*. It queried only
+   `branches/{branch}/protection`, which returns 404 **even when a ruleset
+   protects the branch**. Two repos protected by ruleset were counted as
+   unprotected.
+
+Both were false findings dressed as real ones, and both are the exact failure
+this standard exists to prevent. The checker itself was right about these two
+repos from the start — it consults rulesets as well as classic protection, and
+resolves the default branch before asking. The hand-rolled account scan did
+neither. That is the argument for the tool over the ad-hoc query, made at my own
+expense.
 
 **Account shape.** `LeBonhommePharma` is a **User account on the free plan**,
 not an organization. 57 repos public, 11 private. Public repos can be protected

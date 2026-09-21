@@ -150,6 +150,17 @@ class Context:
                 return out
         return ""
 
+    def merge_is_noop(self, ref) -> bool:
+        """True if merging `ref` into the default branch changes nothing."""
+        base = f"origin/{self.default_branch}"
+        out = self.git("merge-tree", "--write-tree", base, ref)
+        if not out:
+            return False
+        tree = out.splitlines()[0].strip()
+        # merge-tree exits non-zero and emits conflict info on conflict; git()
+        # returns "" then, so a conflicted merge is not a no-op.
+        return bool(tree) and tree == self.git("rev-parse", f"{base}^{{tree}}")
+
     def git(self, *args):
         proc = subprocess.run(
             ["git", "-C", str(self.root), *args],

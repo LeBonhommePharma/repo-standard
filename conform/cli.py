@@ -110,8 +110,13 @@ def main(argv=None):
     for r in RULES:
         try:
             f = r.check(ctx)
-        except (GitError, GitHubUnavailable) as exc:
-            # An input could not be read. The rule did not run.
+        except (GitError, GitHubUnavailable, OSError, UnicodeError) as exc:
+            # An input could not be READ. The rule did not run, and the fault
+            # is the input's, not the checker's. OSError is included
+            # deliberately: a PermissionError on a pbxproj is an unreadable
+            # input, and labelling it a checker bug would repeat the original
+            # sin here -- blaming the wrong thing for a failed read. Both
+            # statuses are non-green, so this only affects attribution.
             f = Finding(r.rule_id, Status.UNCHECKABLE, f"{type(exc).__name__}: {exc}")
         except Exception as exc:
             # The rule itself is broken. Distinct from UNCHECKABLE because a

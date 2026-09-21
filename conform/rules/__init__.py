@@ -228,11 +228,19 @@ def no_stranded_branches(ctx):
         n = ctx.git("rev-list", "--count", f"origin/{ctx.default_branch}..{r}")
         if not (n.isdigit() and int(n) > 0) or name in prs:
             continue
-        # Ahead in commits is not the same as carrying unmerged work. A
+        # Ahead in commits is not the same as carrying unmerged work: a
         # squash-merged branch keeps its original commits, which are not
-        # ancestors of the default branch, while contributing no diff. That is
-        # merged work, not stranded work.
-        if not ctx.git("diff", f"origin/{ctx.default_branch}...{r}", "--name-only"):
+        # ancestors of the default branch.
+        #
+        # The test is whether merging the branch would change the default
+        # branch at all. A diff does not answer this -- two-dot is symmetric
+        # and also reports what the default branch gained afterwards, and
+        # three-dot still shows content that reached it via squash.
+        #
+        # Conservative by design: a branch that conflicts is reported, even if
+        # its unique content is already upstream, because "cannot be merged
+        # cleanly" is itself worth surfacing.
+        if ctx.merge_is_noop(r):
             continue
         stranded.append((int(n), name))
     if stranded:

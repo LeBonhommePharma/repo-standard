@@ -1,0 +1,9 @@
+{
+  "LeBonhommePharma/NATURaL": {
+    "BUNDLE-001": {
+      "reason": "grandfathered; App Store records are live and the SKU is permanent, so the per-platform identifiers cannot be consolidated after the fact",
+      "decided_by": "LP",
+      "decided": "2026-09-21"
+    }
+  }
+}

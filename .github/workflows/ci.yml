@@ -1,0 +1,30 @@
+name: ci
+# Bare `push` on purpose: CI-001 requires that a branch push measures something.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  conform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyyaml
+
+      - name: Prove every rule can fire red and green
+        run: python3 fixtures/prove.py
+
+      # OUT-001: this job checks THIS repo and nothing else. A public workflow
+      # must never emit conformance output for another repo.
+      - name: This repo conforms to its own standard
+        # --allow-unchecked, not "|| true": the GitHub-dependent rules need an
+        # admin token this job does not have, so they print UNCHECKABLE and do
+        # not set the exit status. Any real FAIL still fails the build. They are
+        # verified locally against the live API.
+        run: python3 -m conform . --offline --allow-unchecked

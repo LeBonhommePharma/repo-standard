@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+# Conformance output is never committed. A gap report names which repos lack
+# protection, which guards do not check anything, and where work is stranded --
+# an inventory of soft spots. The value is in the tool, not in the findings.
+# This entry exists before the first report is ever generated: a file that was
+# briefly committed and then removed is still in history and still public.
+CONFORMANCE-*.md
+conformance-*.md
+gap-report*
+reports/

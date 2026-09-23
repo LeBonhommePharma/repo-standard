@@ -62,5 +62,15 @@ currently unused).
 See [docs/STANDARD.md](docs/STANDARD.md). Each rule records what it asserts, how
 it is checked, the observed violation behind it, and where the fixture proves it
 fires. Rules with no observed violation are marked speculative: currently one,
-`PRIV-001`. The other twelve come from drift observed on 2026-09-21. Rules that were considered and
+`PRIV-001`. The other fourteen come from drift observed on 2026-09-21. Rules that were considered and
 deliberately left out are listed at the end, with the reason.
+
+**Thirteen rules are mechanically enforced. Two are not.** `GATE-001` and
+`XKEY-001` are documented review requirements with the exact search commands a
+reviewer runs; there is no code for them, and `conform` prints them as
+`NOT CHECKED` on every run, including a clean one, so a green report never
+implies they were examined. They are not automated because a shallow automation
+of either would reproduce the bug it describes — a `GATE-001` checker that
+inspected the façade *is* `GATE-001`'s bug — and a check that cannot fail is
+the one thing this repo exists to abolish. See
+[Mechanically enforced vs. documented-only](docs/STANDARD.md#mechanically-enforced-vs-documented-only).
